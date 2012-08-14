@@ -383,8 +383,7 @@ var Compiler = exports.Compiler = Class.extend({
 		}
 		// escape the instantiated class names
 		for (var i = 0; i < classDefs.length; ++i) {
-			if ((classDefs[i].flags() & ClassDefinition.IS_NATIVE) == 0
-				&& classDefs[i] instanceof InstantiatedClassDefinition) {
+			if (classDefs[i] instanceof InstantiatedClassDefinition) {
 				classDefs[i].setOutputClassName(
 					classDefs[i].getOutputClassName().replace(/\.</g, "$$").replace(/>/g, "$E").replace(/,\s*/g,"$"));
 			}
