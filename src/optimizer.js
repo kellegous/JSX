@@ -101,7 +101,8 @@ var _Util = exports._Util = Class.extend({
 				|| expr instanceof NewExpression
 				|| expr instanceof AssignmentExpression
 				|| expr instanceof PreIncrementExpression
-				|| expr instanceof PostIncrementExpression) {
+				|| expr instanceof PostIncrementExpression
+				|| expr instanceof SuperExpression) {
 				return false;
 			} else if (expr instanceof CallExpression) {
 				var callingFuncDef = _DetermineCalleeCommand.getCallingFuncDef(expr);
@@ -273,7 +274,7 @@ var Optimizer = exports.Optimizer = Class.extend({
 				this._commands[i].setup(this).performOptimization();
 				this.log("finished optimizer: " + this._commands[i]._identifier);
 			} catch (e) {
-				console.error("optimizer '" + this._identifier + "' died unexpectedly, dumping the logs");
+				console.error("optimizer '" + this._commands[i]._identifier + "' died unexpectedly, dumping the logs");
 				this.dumpLogs(this._log);
 				throw e;
 			}
@@ -694,6 +695,7 @@ var _UnclassifyOptimizationCommand = exports._UnclassifyOptimizationCommand = _O
 				var onStatement = function (statement) {
 					statement.forEachExpression(function (expr, replaceCb) {
 						this._rewriteMethodCallsToStatic(expr, replaceCb, classDefs);
+						return true;
 					}.bind(this));
 					return statement.forEachStatement(onStatement);
 				}.bind(this);
@@ -2555,7 +2557,7 @@ var _UnboxOptimizeCommand = exports._UnboxOptimizeCommand = _FunctionOptimizeCom
 						replaceCb(createLocalExpressionFor(expr.getIdentifierToken().getValue()));
 						return true;
 					} else if (expr instanceof FunctionExpression) {
-						return expr.getFuncDef().forEachStatement(onStatement);
+						return onStatements(expr.getFuncDef().getStatements());
 					} else if (expr instanceof LocalExpression && expr.getLocal() == local) {
 						throw new Error("logic flaw, unexpected pattern");
 					}

@@ -3,11 +3,14 @@ JOBS:=4
 
 OPTIMIZE_FLAGS := lto,unclassify,fold-const,return-if,inline,dce,unbox,fold-const,dce,lcse,array-length,unclassify
 
-all:
+all: src/doc.js
 
-setup:
-	npm install
-	perl web/setup.pl
+setup: doc
+
+
+doc: src/doc.js
+	rm -rf doc
+	find lib -name '*.jsx' | xargs -n 1 -- bin/jsx --mode doc --output doc
 
 # e.g. make test JOBS=2
 test:
@@ -29,6 +32,9 @@ web:
 server:
 	node web/server.js
 
+src/doc.js: src/_doc.js
+	submodules/picotemplate/picotemplate.pl src/_doc.js
+
 # for authors
 web.jsx:
 	idl2jsx/build.pl
@@ -38,12 +44,15 @@ web.jsx:
 update-assets: update-bootstrap update-codemirror
 
 update-codemirror:
+	rm -rf codemirror*
 	curl -LO http://codemirror.net/codemirror.zip
 	unzip -o codemirror.zip
-	cp CodeMirror-*/lib/codemirror.css            web/assets/css
-	cp CodeMirror-*/lib/codemirror.js             web/assets/js
-	cp CodeMirror-*/mode/javascript/javascript.js web/assets/js/mode
-	cp CodeMirror-*/mode/clike/clike.js           web/assets/js/mode
+	cp codemirror-*/lib/codemirror.css            web/assets/css
+	cp codemirror-*/lib/codemirror.js             web/assets/js
+	cp codemirror-*/lib/util/simple-hint.css      web/assets/css
+	cp codemirror-*/lib/util/simple-hint.js       web/assets/js
+	cp codemirror-*/mode/javascript/javascript.js web/assets/js/mode
+	cp codemirror-*/mode/clike/clike.js           web/assets/js/mode
 
 update-bootstrap:
 	curl -LO http://twitter.github.com/bootstrap/assets/bootstrap.zip
@@ -57,4 +66,4 @@ clean:
 	rm -rf CodeMirror-* codemirror.zip
 	rm -rf bootstrap*
 
-.PHONY: test web server
+.PHONY: test web server doc

@@ -25,7 +25,9 @@ eval(Class.$import("./type"));
 eval(Class.$import("./classdef"));
 eval(Class.$import("./statement"));
 eval(Class.$import("./expression"));
+eval(Class.$import("./doc"));
 eval(Class.$import("./util"));
+eval(Class.$import("./completion"));
 
 "use strict";
 
@@ -36,8 +38,8 @@ var Token = exports.Token = Class.extend({
 		this._isIdentifier = isIdentifier;
 		// two args or five args
 		this._filename = filename || null;
-		this._lineNumber = lineNumber || NaN;
-		this._columnNumber = columnNumber || NaN;
+		this._lineNumber = lineNumber;     // Nullable.<int>
+		this._columnNumber = columnNumber; // Nullable.<int>
 	},
 
 	getValue: function () {
@@ -432,6 +434,30 @@ var QualifiedName = exports.QualifiedName = Class.extend({
 			}
 		}
 		return classDef;
+	},
+
+	getTemplateClass: function (parser) {
+		var foundClassDefs = [];
+		var checkClassDef = function (classDef) {
+			if (classDef.className() == this._token.getValue()) {
+				foundClassDefs.push(classDef);
+			}
+		}.bind(this);
+		if (this._import != null) {
+			this._import.getSources().forEach(function (parser) {
+				parser.getTemplateClassDefs().forEach(checkClassDef);
+			});
+		} else {
+			parser.getTemplateClassDefs().forEach(checkClassDef);
+			if (foundClassDefs.length == 0) {
+				parser.getImports().forEach(function (imprt) {
+					imprt.getSources().forEach(function (parser) {
+						parser.getTemplateClassDefs().forEach(checkClassDef);
+					});
+				});
+			}
+		}
+		return foundClassDefs.length == 1 ? foundClassDefs[0] : null;
 	}
 
 });
@@ -447,17 +473,20 @@ var Parser = exports.Parser = Class.extend({
 	parse: function (input, errors) {
 		// lexer properties
 		this._input = input;
-		this._lines = this._input.split(/\r|\n|\r\n/);
+		this._lines = this._input.split(_Lexer.rxNewline);
 		this._tokenLength = 0;
 		this._lineNumber = 1; // one origin
 		this._columnOffset = 0; // zero origin
+		this._fileLevelDocComment = null;
+		this._docComment = null;
 		// insert a marker so that at the completion location we would always get _expectIdentifierOpt called, whenever possible
 		if (this._completionRequest != null) {
 			var compLineNumber = Math.min(this._completionRequest.getLineNumber(), this._lines.length + 1);
+			var line = this._lines[compLineNumber - 1] || '';
 			this._lines[compLineNumber - 1] =
-				this._lines[compLineNumber - 1].substring(0, this._completionRequest.getColumnOffset())
+				line.substring(0, this._completionRequest.getColumnOffset())
 				+ "Q," + // use a character that is permitted within an identifier, but never appears in keywords
-				this._lines[compLineNumber - 1].substring(this._completionRequest.getColumnOffset());
+				line.substring(this._completionRequest.getColumnOffset());
 		}
 		// output
 		this._errors = errors;
@@ -510,6 +539,10 @@ var Parser = exports.Parser = Class.extend({
 
 	getPath: function () {
 		return this._filename;
+	},
+
+	getDocComment: function () {
+		return this._fileLevelDocComment;
 	},
 
 	getClassDefs: function () {
@@ -638,10 +671,21 @@ var Parser = exports.Parser = Class.extend({
 	},
 
 	_registerLocal: function (identifierToken, type) {
-		for (var i = 0; i < this._locals.length; i++) {
-			if (this._locals[i].getName().getValue() == identifierToken.getValue()) {
-				if (type != null && ! this._locals[i].getType().equals(type))
+		var isEqualTo = function (local) {
+			if (local.getName().getValue() == identifierToken.getValue()) {
+				if (type != null && ! local.getType().equals(type))
 					this._newError("conflicting types for variable " + identifierToken.getValue());
+				return true;
+			}
+			return false;
+		}.bind(this);
+		for (var i = 0; i < this._arguments.length; ++i) {
+			if (isEqualTo(this._arguments[i])) {
+				return this._arguments[i];
+			}
+		}
+		for (var i = 0; i < this._locals.length; i++) {
+			if (isEqualTo(this._locals[i])) {
 				return this._locals[i];
 			}
 		}
@@ -656,6 +700,7 @@ var Parser = exports.Parser = Class.extend({
 			// lexer properties
 			lineNumber: this._lineNumber,
 			columnOffset: this._columnOffset,
+			docComment: this._docComment,
 			tokenLength: this._tokenLength,
 			// errors
 			numErrors: this._errors.length,
@@ -671,6 +716,7 @@ var Parser = exports.Parser = Class.extend({
 	_restoreState: function (state) {
 		this._lineNumber = state.lineNumber;
 		this._columnOffset = state.columnOffset;
+		this._docComment = state.docComment;
 		this._tokenLength = state.tokenLength;
 		this._errors.length = state.numErrors;
 		this._closures.splice(state.numClosures);
@@ -692,8 +738,11 @@ var Parser = exports.Parser = Class.extend({
 	},
 
 	_advanceToken: function () {
-		this._forwardPos(this._tokenLength);
-		this._tokenLength = 0;
+		if (this._tokenLength != 0) {
+			this._forwardPos(this._tokenLength);
+			this._tokenLength = 0;
+			this._docComment = null;
+		}
 
 		while (true) {
 			// skip whitespaces and comments in-line
@@ -710,10 +759,30 @@ var Parser = exports.Parser = Class.extend({
 			}
 			switch (this._getInputByLength(2)) {
 			case "/*":
-				if (! this._skipMultilineComment())
-					return;
+				if (this._getInputByLength(4) == "/***") {
+					this._forwardPos(3); // skip to the last *, since the input might be: /***/
+					var fileLevelDocComment = this._parseDocComment();
+					if (fileLevelDocComment == null) {
+						return;
+					}
+					// the first "/***" comment is the file-level doc comment
+					if (this._fileLevelDocComment == null) {
+						this._fileLevelDocComment = fileLevelDocComment;
+					}
+				} else if (this._getInputByLength(3) == "/**") {
+					this._forwardPos(2); // skip to the last *, the input might be: /**/
+					if ((this._docComment = this._parseDocComment()) == null) {
+						return;
+					}
+				} else {
+					this._docComment = null;
+					if (! this._skipMultilineComment()) {
+						return;
+					}
+				}
 				break;
 			case "//":
+				this._docComment = null;
 				if (this._lineNumber == this._lines.length) {
 					this._columnOffset = this._lines[this._lineNumber - 1].length;
 				} else {
@@ -743,6 +812,77 @@ var Parser = exports.Parser = Class.extend({
 			}
 			++this._lineNumber;
 			this._columnOffset = 0;
+		}
+	},
+
+	_parseDocComment: function () {
+
+		var docComment = new DocComment();
+		var node = docComment;
+
+		while (true) {
+			// skip " * ", or return if "*/"
+			this._parseDocCommentAdvanceWhiteSpace();
+			if (this._getInputByLength(2) == "*/") {
+				this._forwardPos(2);
+				return docComment;
+			} else if (this._getInputByLength(1) == "*") {
+				this._forwardPos(1);
+				this._parseDocCommentAdvanceWhiteSpace();
+			}
+			// fetch tag (and paramName), and setup the target node to push content into
+			var tagMatch = this._getInput(this._columnOffset).match(/^\@([0-9A-Za-z_]+)[ \t]*/);
+			if (tagMatch != null) {
+				this._forwardPos(tagMatch[0].length);
+				var tag = tagMatch[1];
+				switch (tag) {
+				case "param":
+					var nameMatch = this._getInput(this._columnOffset).match(/[0-9A-Za-z_]+/);
+					if (nameMatch != null) {
+					     var token = new Token(nameMatch[0], false, this._filename, this._lineNumber, this._getColumn());
+						this._forwardPos(nameMatch[0].length);
+						node = new DocCommentParameter(token);
+						docComment.getParams().push(node);
+					} else {
+						this._newError("name of the parameter not found after @param");
+						node = null;
+					}
+					break;
+				default:
+					node = new DocCommentTag(tag);
+					docComment.getTags().push(node);
+					break;
+				}
+			}
+			var endAt = this._getInput(this._columnOffset).indexOf("*/");
+			if (endAt != -1) {
+				if (node != null) {
+					node.appendDescription(this._getInput(this._columnOffset).substring(0, endAt));
+				}
+				this._forwardPos(endAt + 2);
+				return docComment;
+			}
+			if (node != null) {
+				node.appendDescription(this._getInput(this._columnOffset));
+			}
+			if (this._lineNumber == this._lines.length) {
+				this._columnOffset = this._lines[this._lineNumber - 1].length;
+				this._newError("could not find the end of the doccomment");
+				return null;
+			}
+			++this._lineNumber;
+			this._columnOffset = 0;
+		}
+	},
+
+	_parseDocCommentAdvanceWhiteSpace: function () {
+		while (true) {
+			var ch = this._getInputByLength(1);
+			if (ch == " " || ch == "\t") {
+				this._forwardPos(1);
+			} else {
+				break;
+			}
 		}
 	},
 
@@ -990,10 +1130,13 @@ var Parser = exports.Parser = Class.extend({
 		this._objectTypesUsed = [];
 		// attributes* class
 		this._classFlags = 0;
+		var docComment = null;
 		while (true) {
 			var token = this._expect([ "class", "interface", "mixin", "abstract", "final", "native", "__fake__" ]);
 			if (token == null)
 				return false;
+			if (this._classFlags == 0)
+				docComment = this._docComment;
 			if (token.getValue() == "class")
 				break;
 			if (token.getValue() == "interface") {
@@ -1147,9 +1290,9 @@ var Parser = exports.Parser = Class.extend({
 
 		// done
 		if (this._typeArgs.length != 0) {
-			this._templateClassDefs.push(new TemplateClassDefinition(className.getValue(), this._classFlags, this._typeArgs, this._extendType, this._implementTypes, members, this._objectTypesUsed));
+			this._templateClassDefs.push(new TemplateClassDefinition(className, className.getValue(), this._classFlags, this._typeArgs, this._extendType, this._implementTypes, members, this._objectTypesUsed, docComment));
 		} else {
-			var classDef = new ClassDefinition(className, className.getValue(), this._classFlags, this._extendType, this._implementTypes, members, this._objectTypesUsed);
+			var classDef = new ClassDefinition(className, className.getValue(), this._classFlags, this._extendType, this._implementTypes, members, this._objectTypesUsed, docComment);
 			this._classDefs.push(classDef);
 			classDef.setParser(this);
 		}
@@ -1158,10 +1301,13 @@ var Parser = exports.Parser = Class.extend({
 
 	_memberDefinition: function () {
 		var flags = 0;
+		var docComment = null;
 		while (true) {
-			var token = this._expect([ "function", "var", "static", "abstract", "override", "final", "const", "native", "__readonly__", "inline", "__pure__" ]);
+			var token = this._expect([ "function", "var", "static", "abstract", "override", "final", "const", "native", "__readonly__", "inline", "__pure__", "delete" ]);
 			if (token == null)
 				return null;
+			if (flags == 0)
+				docComment = this._docComment;
 			if (token.getValue() == "const") {
 				if ((flags & ClassDefinition.IS_STATIC) == 0) {
 					this._newError("constants must be static");
@@ -1210,6 +1356,9 @@ var Parser = exports.Parser = Class.extend({
 			case "__pure__":
 				newFlag = ClassDefinition.IS_PURE;
 				break;
+			case "delete":
+				newFlag = ClassDefinition.IS_DELETE;
+				break;
 			default:
 				throw new Error("logic flaw");
 			}
@@ -1222,7 +1371,7 @@ var Parser = exports.Parser = Class.extend({
 		if ((this._classFlags & ClassDefinition.IS_INTERFACE) != 0)
 			flags |= ClassDefinition.IS_ABSTRACT;
 		if (token.getValue() == "function") {
-			return this._functionDefinition(token, flags, this._classFlags);
+			return this._functionDefinition(token, flags, docComment);
 		}
 		// member variable decl.
 		if ((flags & ~(ClassDefinition.IS_STATIC | ClassDefinition.IS_ABSTRACT | ClassDefinition.IS_CONST | ClassDefinition.IS_READONLY | ClassDefinition.IS_INLINE)) != 0) {
@@ -1258,10 +1407,10 @@ var Parser = exports.Parser = Class.extend({
 		// all non-native, non-template values have initial value
 		if (this._typeArgs.length == 0 && initialValue == null && (this._classFlags & ClassDefinition.IS_NATIVE) == 0)
 			initialValue = Expression.getDefaultValueExpressionOf(type);
-		return new MemberVariableDefinition(token, name, flags, type, initialValue);
+		return new MemberVariableDefinition(token, name, flags, type, initialValue, docComment);
 	},
 
-	_functionDefinition: function (token, flags) {
+	_functionDefinition: function (token, flags, docComment) {
 		// name
 		var name = this._expectIdentifier(null);
 		if (name == null)
@@ -1310,13 +1459,24 @@ var Parser = exports.Parser = Class.extend({
 				if (returnType == null)
 					return null;
 			}
+			// take care of: "delete function constructor();"
+			if ((flags & ClassDefinition.IS_DELETE) != 0) {
+				if (name.getValue() != "constructor" || (flags & ClassDefinition.IS_STATIC) != 0) {
+					this._newError("only constructors may have the \"delete\" attribute set");
+					return null;
+				}
+				if (args.length != 0) {
+					this._newError("cannot \"delete\" a constructor with one or more arguments");
+					return null;
+				}
+			}
 			function createDefinition(locals, statements, closures, lastToken) {
 				return typeArgs.length != 0
-					? new TemplateFunctionDefinition(token, name, flags, typeArgs, returnType, args, locals, statements, closures, lastToken)
-					: new MemberFunctionDefinition(token, name, flags, returnType, args, locals, statements, closures, lastToken);
+					? new TemplateFunctionDefinition(token, name, flags, typeArgs, returnType, args, locals, statements, closures, lastToken, docComment)
+					: new MemberFunctionDefinition(token, name, flags, returnType, args, locals, statements, closures, lastToken, docComment);
 			}
 			// take care of abstract function
-			if ((this._classFlags & ClassDefinition.IS_INTERFACE) != 0) {
+			if ((this._classFlags & (ClassDefinition.IS_INTERFACE | ClassDefinition.IS_DELETE)) != 0) {
 				if (this._expect(";") == null)
 					return null;
 				return createDefinition(null, null, null, null);
@@ -2455,13 +2615,13 @@ var Parser = exports.Parser = Class.extend({
 				var expr = this._expr();
 				this._statements.push(new ReturnStatement(token, expr));
 				return new MemberFunctionDefinition(
-						token, null, ClassDefinition.IS_STATIC, returnType, args, this._locals, this._statements, this._closures, null);
+						token, null, ClassDefinition.IS_STATIC, returnType, args, this._locals, this._statements, this._closures, null, null);
 			} else {
 				var lastToken = this._block();
 				if (lastToken == null)
 					return null;
 				return new MemberFunctionDefinition(
-						token, null, ClassDefinition.IS_STATIC, returnType, args, this._locals, this._statements, this._closures, lastToken);
+						token, null, ClassDefinition.IS_STATIC, returnType, args, this._locals, this._statements, this._closures, lastToken, null);
 			}
 		} finally {
 			this._popScope();
@@ -2509,7 +2669,7 @@ var Parser = exports.Parser = Class.extend({
 			this._popScope();
 			return null;
 		}
-		var funcDef = new MemberFunctionDefinition(token, null, ClassDefinition.IS_STATIC, returnType, args, this._locals, this._statements, this._closures, lastToken);
+		var funcDef = new MemberFunctionDefinition(token, null, ClassDefinition.IS_STATIC, returnType, args, this._locals, this._statements, this._closures, lastToken, null);
 		this._popScope();
 		this._closures.push(funcDef);
 		return new FunctionExpression(token, funcDef);
@@ -2746,157 +2906,3 @@ var Parser = exports.Parser = Class.extend({
 
 });
 
-var CompletionCandidates = exports.CompletionCandidates = Class.extend({
-
-	constructor: function () {
-		this._prefix = null;
-	},
-
-	getCandidates: null, // function (string[]) : void
-
-	getPrefix: function () {
-		return this._prefix;
-	},
-
-	setPrefix: function (prefix) {
-		this._prefix = prefix;
-		return this;
-	},
-
-	$_addClasses: function (candidates, parser, autoCompleteMatchCb) {
-		parser.getClassDefs().forEach(function (classDef) {
-			if (classDef instanceof InstantiatedClassDefinition) {
-				// skip
-			} else {
-				if (autoCompleteMatchCb == null || autoCompleteMatchCb(classDef)) {
-					candidates.push(classDef.className());
-				}
-			}
-		});
-		parser.getTemplateClassDefs().forEach(function (classDef) {
-			if (autoCompleteMatchCb == null || autoCompleteMatchCb(classDef)) {
-				candidates.push(classDef.className());
-			}
-		});
-	},
-
-	$_addImportedClasses: function (candidates, imprt, autoCompleteMatchCb) {
-		var classNames = imprt.getClassNames();
-		if (classNames != null) {
-			classNames.forEach(function (className) {
-				// FIXME can we refer to the classdefs of the classnames here?
-				candidates.push(className);
-			});
-		} else {
-			imprt.getSources().forEach(function (parser) {
-				CompletionCandidates._addClasses(candidates, parser, autoCompleteMatchCb);
-			});
-		}
-	}
-
-});
-
-var KeywordCompletionCandidate = exports.KeywordCompletionCandidate = CompletionCandidates.extend({
-
-	constructor: function (expected) {
-		CompletionCandidates.prototype.constructor.call(this);
-		this._expected = expected;
-	},
-
-	getCandidates: function (candidates) {
-		candidates.push(this._expected);
-	}
-
-});
-
-var CompletionCandidatesOfTopLevel = exports.CompletionCandidatesOfTopLevel = CompletionCandidates.extend({
-
-	constructor: function (parser, autoCompleteMatchCb) {
-		CompletionCandidates.prototype.constructor.call(this);
-		this._parser = parser;
-		this._autoCompleteMatchCb = autoCompleteMatchCb;
-	},
-
-	getCandidates: function (candidates) {
-		CompletionCandidates._addClasses(candidates, this._parser, this._autoCompleteMatchCb);
-		for (var i = 0; i < this._parser._imports.length; ++i) {
-			var imprt = this._parser._imports[i];
-			var alias = imprt.getAlias();
-			if (alias != null) {
-				candidates.push(alias);
-			} else {
-				CompletionCandidates._addImportedClasses(candidates, imprt, this._autoCompleteMatchCb);
-			}
-		}
-	}
-
-});
-
-var _CompletionCandidatesWithLocal = exports._CompletionCandidatesWithLocal = CompletionCandidatesOfTopLevel.extend({
-
-	constructor: function (parser) {
-		CompletionCandidatesOfTopLevel.prototype.constructor.call(this, parser, null);
-		this._locals = [];
-		parser._forEachScope(function (locals, args) {
-			this._locals = this._locals.concat(locals, args);
-			return true;
-		}.bind(this));
-	},
-
-	getCandidates: function (candidates) {
-		this._locals.forEach(function (local) {
-			candidates.push(local.getName().getValue());
-		});
-		CompletionCandidatesOfTopLevel.prototype.getCandidates.call(this, candidates);
-	}
-
-});
-
-var _CompletionCandidatesOfNamespace = exports._CompletionCandidatesOfNamespace = CompletionCandidates.extend({
-
-	constructor: function (imprt, autoCompleteMatchCb) {
-		CompletionCandidates.prototype.constructor.call(this);
-		this._import = imprt;
-		this._autoCompleteMatchCb = autoCompleteMatchCb;
-	},
-
-	getCandidates: function (candidates) {
-		CompletionCandidates._addImportedClasses(this._import, this._autoCompleteMatchCb);
-	}
-
-});
-
-var _CompletionCandidatesOfProperty = exports._CompletionCandidatesOfProperty = CompletionCandidates.extend({
-
-	constructor: function (expr) {
-		CompletionCandidates.prototype.constructor.call(this);
-		this._expr = expr;
-	},
-
-	getCandidates: function (candidates) {
-		var type = this._expr.getType();
-		if (type == null)
-			return;
-		type = type.resolveIfNullable();
-		if (type.equals(Type.voidType)
-			|| type.equals(Type.nullType)
-			|| type.equals(Type.variantType))
-			return;
-		// type with classdef
-		var classDef = type.getClassDef();
-		if (classDef == null)
-			return;
-		var isStatic = this._expr instanceof ClassExpression;
-		classDef.forEachMember(function (member) {
-			if (((member.flags() & ClassDefinition.IS_STATIC) != 0) == isStatic) {
-				if (! isStatic && member.name() == "constructor") {
-					// skip
-				} else {
-					candidates.push(member.name());
-				}
-			}
-			return true;
-		});
-	}
-
-});

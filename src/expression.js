@@ -46,7 +46,7 @@ var Expression = exports.Expression = Class.extend({
 	clone: null,
 
 	instantiate: function (instantiationContext) {
-		(function onExpr(expr) {
+		return (function onExpr(expr) {
 			if (expr instanceof NewExpression
 				|| expr instanceof ArrayLiteralExpression
 				|| expr instanceof MapLiteralExpression
@@ -400,13 +400,13 @@ var StringLiteralExpression = exports.StringLiteralExpression = LeafExpression.e
 
 var RegExpLiteralExpression = exports.RegExpLiteralExpression = LeafExpression.extend({
 
-	constructor: function (token) {
+	constructor: function (token, type) {
 		LeafExpression.prototype.constructor.call(this, token);
-		this._type = null;
+		this._type = type; // nullable
 	},
 
 	clone: function () {
-		return new RegExpLiteralExpression(this._token);
+		return new RegExpLiteralExpression(this._token, this._type);
 	},
 
 	serialize: function () {
@@ -604,13 +604,18 @@ var MapLiteralExpression = exports.MapLiteralExpression = Expression.extend({
 		if (! succeeded)
 			return false;
 		// determine the type from the array members if the type was not specified
-		if (this._type != null) {
+		if (this._type != null && this._type == Type.variantType) {
+			var expectedType = null;
+		} else if (this._type != null && this._type instanceof ObjectType) {
 			var classDef = this._type.getClassDef();
 			if (! (classDef instanceof InstantiatedClassDefinition && classDef.getTemplateClassName() == "Map")) {
 				context.errors.push(new CompileError(this._token, "specified type is not a hash type"));
 				return false;
 			}
-			var expectedType = this._type.getTypeArguments()[0];
+			expectedType = this._type.getTypeArguments()[0];
+		} else if (this._type != null) {
+			context.errors.push(new CompileError(this._token, "invalid type for a map literal"));
+			return false;
 		} else {
 			for (var i = 0; i < this._elements.length; ++i) {
 				var elementType = this._elements[i].getExpr().getType();
@@ -628,12 +633,14 @@ var MapLiteralExpression = exports.MapLiteralExpression = Expression.extend({
 				return false;
 			}
 		}
-		// check type of the elements
-		for (var i = 0; i < this._elements.length; ++i) {
-			var elementType = this._elements[i].getExpr().getType();
-			if (! elementType.isConvertibleTo(expectedType)) {
-				context.errors.push(new CompileError(this._token, "cannot assign '" + elementType.toString() + "' to a map of '" + expectedType.toString() + "'"));
-				succeeded = false;
+		// check type of the elements (expect when expectedType == null, meaning that it is a variant)
+		if (expectedType != null) {
+			for (var i = 0; i < this._elements.length; ++i) {
+				var elementType = this._elements[i].getExpr().getType();
+				if (! elementType.isConvertibleTo(expectedType)) {
+					context.errors.push(new CompileError(this._token, "cannot assign '" + elementType.toString() + "' to a map of '" + expectedType.toString() + "'"));
+					succeeded = false;
+				}
 			}
 		}
 		return succeeded;
@@ -1531,7 +1538,7 @@ var BinaryNumberExpression = exports.BinaryNumberExpression = BinaryExpression.e
 			if (this.isConvertibleTo(context, this._expr1, Type.stringType, true)) {
 			  return this.assertIsConvertibleTo(context, this._expr2, Type.stringType, true);
 			}
-			context.errors.push(new CompileError(this._token, "cannot apply operator '" + this._token.getValue() + "' to type '" + expr1Type.toString() + "'"));
+			context.errors.push(new CompileError(this._token, "cannot apply operator '" + this._token.getValue() + "' to type '" + this._expr1.getType().toString() + "'"));
 			return false;
 		default:
 			var expr1Type = this._expr1.getType().resolveIfNullable();
@@ -2022,6 +2029,11 @@ var NewExpression = exports.NewExpression = OperatorExpression.extend({
 			return false;
 		}
 		var ctors = classDef.getMemberTypeByName(context.errors, this._token, "constructor", false, [], ClassDefinition.GET_MEMBER_MODE_CLASS_ONLY);
+		if (ctors == null) {
+			// classes will always have at least one constructor unless the default constructor is marked "delete"
+			context.errors.push(new CompileError(this._token, "the class cannot be instantiated"));
+			return false;
+		}
 		var argTypes = Util.analyzeArgs(
 			context, this._args, this,
 			ctors.getExpectedCallbackTypes(this._args.length, false));

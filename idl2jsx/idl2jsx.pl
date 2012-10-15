@@ -11,18 +11,22 @@ use Storable qw(lock_retrieve lock_store);
 use LWP::UserAgent;
 use URI::Escape qw(uri_escape);
 use Time::HiRes ();
+use Getopt::Long;
 
 use constant WIDTH => 68;
 
 # see http://www.w3.org/TR/WebIDL/
 
-my $continuous = ($ARGV[0] ~~ "--continuous" && shift @ARGV);
+GetOptions(
+    "continuous"    => \my $continuous,
+    "refresh-specs" => \my $refresh,
+) or die;
 
 my @files = @ARGV;
 
 my $root = dirname(__FILE__);
 my $db = "$root/.idl2jsx.bin";
-mkdir "$root/.save";
+mkdir "$root/spec";
 
 {
     my $t0 = [Time::HiRes::gettimeofday()];
@@ -41,6 +45,7 @@ my %fake = (
     DocumentView => 1,
 
     EventListener => 1,
+    EventHandler => 1,
     EventTarget => 1,
     XMLHttpRequestEventTarget => 1,
 );
@@ -112,6 +117,9 @@ define_alias('Function' => 'function(:Event):void');
 # EventListener is written in legacy IDL
 define_alias('EventListener' => 'function(:Event):void');
 
+# http://dev.w3.org/html5/spec/webappapis.html#eventhandler
+define_alias('EventHandler'  => 'function(:Event):void');
+
 # TODO: type resolution process
 
 # for DataTransferItem
@@ -121,6 +129,11 @@ define_alias('MediaQueryListListener' => 'function(:MediaQueryList):void');
 
 # http://www.w3.org/TR/file-system-api/
 define_alias('FileCallback' => 'function(:File):void');
+
+# http://www.w3.org/TR/2012/WD-mediacapture-streams-20120628/#dictionary-mediatrackconstraints-members
+# http://datatracker.ietf.org/doc/draft-burnett-rtcweb-constraints-registry/
+define_alias('MediaTrackConstraintSet' => 'Map.<variant>');
+define_alias('MediaTrackConstraint'    => 'Map.<variant>');
 
 # https://wiki.mozilla.org/GamepadAPI
 define_alias('nsIVariant'  => 'variant');
@@ -193,7 +206,12 @@ my %classdef;
 tie %classdef, 'Tie::IxHash';
 %classdef = %{lock_retrieve($db)} if $continuous and -e $db;
 
-foreach my $file(@files) {
+foreach my $src(@files) {
+    my($specname, $file) = split /\s*;\s*/, $src, 2;
+    if (! $file) {
+        $file = $src;
+        $specname = uri_escape($file);
+    }
     info "parsing $file";
 
     # XXX: looks a bug in http://www.w3.org/TR/html5/single-page.html
@@ -206,11 +224,14 @@ foreach my $file(@files) {
         my $arg = $file;
         if($arg =~ /^https?:/) {
             state $ua = LWP::UserAgent->new();
-            my $filename = "$root/.save/" . uri_escape($arg);
-            my $res = $ua->mirror($arg, $filename);
+            my $filename = "$root/spec/$specname";
 
-            if($res->header("Last-Modified")) {
-                info("Last-Modified: ", $res->header("Last-Modified"));
+            if ($refresh && not -e $filename) {
+                my $res = $ua->mirror($arg, $filename);
+
+                if($res->header("Last-Modified")) {
+                    info("Last-Modified: ", $res->header("Last-Modified"));
+                }
             }
 
             if($arg =~ /\.idl$/) {
@@ -280,19 +301,19 @@ foreach my $file(@files) {
                 \s* ;
             }xmsg) {
 
-        my $class   = $+{name};
-        my $attrs   = $+{attrs};
-        my $type    = $+{type};
-        my $base    = $+{base};
-        my $members = $+{members};
+        my $class      = $+{name};
+        my $attrs      = $+{attrs};
+        my $class_type = $+{type};
+        my $base       = $+{base};
+        my $members    = $+{members};
 
         if($Document_is_HTMLDocument && $class eq 'Document') {
-            $type =~ s/partial \s+//xms;
+            $class_type =~ s/partial \s+//xms;
             $class = "HTMLDocument";
             $base  = "Document";
         }
 
-        info $type, $class, ($base ? ": $base" : ());
+        info $class_type, $class, ($base ? ": $base" : ());
 
 
         my $def = $classdef{$class} //= {
@@ -304,7 +325,7 @@ foreach my $file(@files) {
             fake    => $fake{$class},
         };
 
-        if($type !~ /\b partial \b/xms) {
+        if($class_type !~ /\b partial \b/xms) {
             $has_definition{$class} = 1;
             $def->{spec} = $spec_name;
         }
@@ -350,9 +371,9 @@ foreach my $file(@files) {
         # FIXME: Complex regular subexpression recursion limit (32766) exceeded
 
         while($members =~ m{
-                (?<comments> $rx_comments)
-                |
                 (?<spaces> \s+)
+                |
+                (?<comments> $rx_comments)
                 |
                 (?<member> [^;]+;
                     (?: \s+ | (?<member_comment> $rx_comments* ) \n)
@@ -424,7 +445,7 @@ foreach my $file(@files) {
                 if($+{readonly}) {
                     $decl = "__readonly__ $decl";
                 }
-                my $type = to_jsx_type($+{type});
+                my $type = to_jsx_type($+{type}, union_to_variant => 1);
 
                 $decl .= " $id : $type;";
 
@@ -674,6 +695,10 @@ sub to_jsx_type {
     my $original = $idl_type;
 
     $idl_type =~ s/.+://; # remove namespace
+
+    if ($attr{union_to_variant} && $idl_type =~ m{ \b or \b }xms) {
+        return "variant/*$idl_type*/";
+    }
 
     my $array;
     if($idl_type =~ s{\A sequence < (.+?) >  }{$1}xms) {
