@@ -34,6 +34,8 @@
 
 final native class console {
 	static function log(value : variant) : void;
+  static function log(a : variant, b : variant) : void;
+  
 	static function info(value : variant) : void;
 	static function warn(value : variant) : void;
 	static function error(value : variant) : void;
