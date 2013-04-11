@@ -54,6 +54,10 @@ native final class Map.<T> {
 	 */
 	function hasOwnProperty(key : string) : boolean;
 
+	/**
+	 * Returns an array of keys of the map.
+	 */
+	function keys() : string[];
 }
 
 /**
@@ -941,6 +945,17 @@ native class Error {
 	var name : string;
 	var message : string;
 
+	/**
+	 * Implementation-dependent stack trace information
+	 */
+	var stack : string;
+
+	/*(TBD)*
+	 * V8 extention to create the stack trace
+	 * @see http://code.google.com/p/v8/wiki/JavaScriptStackTraceApi
+	 */
+	//static function createStackTrace(error : Error);
+
 }
 
 native class EvalError extends Error {
@@ -995,6 +1010,12 @@ native final class JSX {
 	delete function constructor();
 
 	/**
+	 * A flag which is disabled by <code>--optimize no-debug</code>.<br />
+	 * This is intended to remove debugging statements on release build.
+	 */
+	static const DEBUG = true;
+
+	/**
 	 * Returns whether or not the profiler is running.
 	 */
 	static function profilerIsRunning() : boolean;
@@ -1007,9 +1028,10 @@ native final class JSX {
 	/**
 	 * <p>Posts the profiler results to the given URL.</p>
 	 *
-	 * <p>Please refer to <a href="http://jsx.github.com/doc/profiler.html">the profiler document</a> for using the function.</p>
+	 * <p>Please refer to <a href="http://jsx.github.io/doc/profiler.html">the profiler document</a> for using the function.</p>
 	 */
 	static function postProfileResults(url : string) : void;
+	static function postProfileResults(url : string, cb : function (error:Error, resultUrl:string):void) : void;
 
 	/**
 	 * Resets the collected profiler results.

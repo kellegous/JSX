@@ -19,11 +19,8 @@
         text-align: right;
       }
     </style>
-    <script src="../../build/jsx-compiler.js"></script>
-    <script>
-      jsx.optimizationLevel = 1;
-    </script>
-    <script type="application/jsx" src="shooting.jsx"></script>
+    <script src="../../build/jsx-script-loader.jsx.js"></script>
+    <script type="application/jsx" src="shooting.jsx" data-optimization-level="1"></script>
     <script src="shooting.js"></script>
     <script>
       window.addEventListener("load", function(e) {
